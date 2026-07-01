@@ -45,6 +45,7 @@ QUERIES = {
     "Refinamento":         ("6a95ca1e-4603-4a2d-ba76-a823097da1b5", PROJECT),
     "Espera Sprint":       ("33ede8e9-33c2-4dfb-9961-0157b1c0feb1", PROJECT),
     "Jornal":              ("bd80d41b-8279-48fd-abfb-61ae3dcd7050", PROJECT),
+    "Incidentes Cross":   ("539b23e7-b8a5-44da-a996-c717056af9fa", "2clix"),
 }
 PARENT_TYPES = {"Product Backlog Item", "Bug", "Feature", "Epic"}
 
@@ -53,6 +54,7 @@ FIELDS = ",".join([
     "Microsoft.VSTS.Common.Priority","System.WorkItemType",
     "System.ChangedDate","System.CreatedDate",
     "Microsoft.VSTS.Scheduling.Effort","System.Tags",
+    "Microsoft.VSTS.Common.StateChangeDate",
 ])
 DEVS = [
     ("Wesley Bernardes",  "Front Líder",         "Wesley"),
@@ -105,6 +107,15 @@ def o(s):    return OR+str(s)+RS
 def dim(s):  return DM+str(s)+RS
 def bold(s): return BD+str(s)+RS
 
+_ITEM_BASE_URL = "https://dev.azure.com/" + ORG + "/_workitems/edit/"
+
+def ilink(iid, prefix="", col=None):
+    """Retorna #ID como OSC-8 hyperlink clicável no terminal (iTerm2, VSCode, macOS Terminal)."""
+    url  = _ITEM_BASE_URL + str(iid)
+    clr  = col if col is not None else DM
+    text = clr + prefix + "#" + str(iid) + RS
+    return "\033]8;;" + url + "\007" + text + "\033]8;;\007"
+
 
 # ── Logo ──────────────────────────────────────────────────────────────────────
 _LOGO = [
@@ -146,11 +157,14 @@ def ado_post(url, body):
     with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read())
 
-def fetch_tasks_direct(project=None):
-    """Busca Tasks ativas via WIQL — captura tasks cujo parent não está nas queries."""
+def fetch_tasks_direct(project=None, types=None):
+    """Busca itens ativos via WIQL — safety net para itens não cobertos pelas queries salvas."""
     proj  = project or PROJECT
+    if types is None:
+        types = ("Task",)
+    types_filter = ", ".join(f"'{t}'" for t in types)
     wiql  = ("SELECT [System.Id] FROM WorkItems "
-             "WHERE [System.WorkItemType] = 'Task' "
+             f"WHERE [System.WorkItemType] IN ({types_filter}) "
              f"AND [System.TeamProject] = '{proj}' "
              "AND [System.State] NOT IN ('Done','Removed','Closed') "
              "ORDER BY [System.ChangedDate] DESC")
@@ -175,8 +189,9 @@ def fetch_tasks_direct(project=None):
             "type":        f.get("System.WorkItemType", ""),
             "changedDate": f.get("System.ChangedDate", ""),
             "createdDate": f.get("System.CreatedDate", ""),
-            "effort":      f.get("Microsoft.VSTS.Scheduling.Effort", ""),
-            "tags":        f.get("System.Tags", ""),
+            "effort":          f.get("Microsoft.VSTS.Scheduling.Effort", ""),
+            "tags":            f.get("System.Tags", ""),
+            "stateChangeDate": f.get("Microsoft.VSTS.Common.StateChangeDate", ""),
         })
     return result
 
@@ -203,8 +218,9 @@ def fetch_query(qid, project=None):
             "type":        f.get("System.WorkItemType", ""),
             "changedDate": f.get("System.ChangedDate", ""),
             "createdDate": f.get("System.CreatedDate", ""),
-            "effort":      f.get("Microsoft.VSTS.Scheduling.Effort", ""),
-            "tags":        f.get("System.Tags", ""),
+            "effort":          f.get("Microsoft.VSTS.Scheduling.Effort", ""),
+            "tags":            f.get("System.Tags", ""),
+            "stateChangeDate": f.get("Microsoft.VSTS.Common.StateChangeDate", ""),
         })
     return result
 
@@ -276,8 +292,9 @@ def fetch_children_of(parent_items):
                     "type":        f.get("System.WorkItemType", ""),
                     "changedDate": f.get("System.ChangedDate", ""),
                     "createdDate": f.get("System.CreatedDate", ""),
-                    "effort":      f.get("Microsoft.VSTS.Scheduling.Effort", ""),
-                    "tags":        f.get("System.Tags", ""),
+                    "effort":          f.get("Microsoft.VSTS.Scheduling.Effort", ""),
+                    "tags":            f.get("System.Tags", ""),
+                    "stateChangeDate": f.get("Microsoft.VSTS.Common.StateChangeDate", ""),
                 })
         except Exception:
             pass
@@ -354,7 +371,7 @@ def print_item(item, maxw=50):
     title = item["title"]
     who   = item["assignedTo"]
     d     = days_since(item["changedDate"])
-    print("  " + dim("#"+str(iid)) + "  " +
+    print("  " + ilink(iid) + "  " +
           type_tag(item["type"]) + "  " +
           pc(pri)+"P"+pri+RS + "  " +
           sc(state)+state[:22]+RS + "  " +
@@ -372,7 +389,10 @@ def is_done(i):
     return any(k in i["state"].lower() for k in ["done","publicado","validado qa","pronto para qa","closed","resolved"])
 
 def is_active(i):
-    return any(k in i["state"].lower() for k in ["andamento","executar","fazendo","in progress","doing","to do","new","discovery","committed","active"])
+    return any(k in i["state"].lower() for k in ["andamento","executar","fazendo","in progress","doing","to do","new","discovery","active"])
+
+def is_duplicate(i):
+    return "duplicado" in i["state"].lower()
 
 # ── Histórico de atividade por pessoa ─────────────────────────────────────────
 _updates_cache = {}
@@ -395,7 +415,7 @@ def fetch_last_touch(item_id, person_frag):
     return None
 
 def stale_sfx(item_id, person_frag, changed_date):
-    """⏱Nd indicator: usa atividade da pessoa; só faz fetch quando changedDate > 2d."""
+    """ ⏱Nd indicator: usa atividade da pessoa; só faz fetch quando changedDate > 2d."""
     d_any = days_since(changed_date)
     if not d_any or d_any <= 2:
         return ""
@@ -405,7 +425,7 @@ def stale_sfx(item_id, person_frag, changed_date):
     if d <= 2:
         return ""
     col = RE if d > 10 else YE
-    return "  " + col + "⏱" + str(d) + "d" + RS
+    return "  " + col + " ⏱ " + str(d) + "d" + RS
 
 # ── Comandos ──────────────────────────────────────────────────────────────────
 def cmd_resumo(data):
@@ -450,7 +470,7 @@ def cmd_daily(data):
 
     # Busca Tasks ativas diretamente via WIQL (captura tasks cujo parent não está nas queries)
     try:
-        direct_tasks = fetch_tasks_direct(PROJECT)
+        direct_tasks = fetch_tasks_direct(PROJECT, types=("Task", "Bug"))
         for t in direct_tasks:
             if t["id"] not in seen:
                 seen.add(t["id"])
@@ -471,10 +491,33 @@ def cmd_daily(data):
     print(dim("  Sem detalhamento técnico.\n"))
     print(dim("  Script: O que finalizei? / O que vou finalizar? / O que pode me impedir?\n"))
 
+    _incident_states = {"approved", "em andamento", "pronto para qa"}
+    all_incidents = [i for i in data.get("Incidentes Cross", [])
+                     if i["state"].lower() in _incident_states]
+    _incident_ids = {i["id"] for i in all_incidents}
+
+    def show_incidents_for(frag, header=None):
+        mine = [i for i in all_incidents if frag.lower() in i["assignedTo"].lower()]
+        if not mine:
+            return
+        if header:
+            print(BD + OR + "▶ " + header + RS + "  " + OR + str(len(mine)) + " incidente(s)" + RS)
+        else:
+            print("  " + OR + "⚡ Incidentes (" + str(len(mine)) + "):" + RS)
+        for i in sorted(mine, key=lambda x: x.get("stateChangeDate") or ""):
+            iid    = i["id"]
+            d_recv = days_since(i.get("stateChangeDate"))
+            col_d  = RE if d_recv and d_recv > 10 else YE if d_recv and d_recv > 2 else DM
+            sfx    = ("  " + col_d + " ⏱ " + str(d_recv) + "d" + RS) if d_recv is not None else ""
+            print("     " + ilink(iid) + "  " + OR + BD + "[INCI]" + RS + "  " +
+                  pc(i["priority"]) + "P" + i["priority"] + RS + "  " +
+                  sc(i["state"]) + i["state"][:16] + RS + "  " +
+                  i["title"][:44] + sfx)
+
     def dev_block(label, role, frag, col=BL):
-        items   = find_items(flat, frag)
+        items   = [i for i in find_items(flat, frag) if not is_duplicate(i)]
         done_it = [i for i in items if is_done(i) and (days_since(i["changedDate"]) or 999) <= RECENT_DONE_DAYS]
-        active  = [i for i in items if is_active(i)]
+        active  = [i for i in items if is_active(i) and i["id"] not in _incident_ids]
         blocked = [i for i in items if is_blocked(i)]
         n_stale = sum(1 for i in active if (days_since(i["changedDate"]) or 0) > 2)
         stale_sfx = "  " + y("⚠ "+str(n_stale)+" parado(s)") if n_stale and not blocked else ""
@@ -486,7 +529,7 @@ def cmd_daily(data):
             print("  " + g("✅ Finalizados (" + str(len(done_it)) + "):"))
             for i in done_it[:3]:
                 iid = i["id"]
-                print("     " + dim("#"+str(iid)) + "  " + type_tag(i["type"]) + "  " + i["title"][:48] + "  " + dim("["+i["state"]+"]"))
+                print("     " + ilink(iid) + "  " + type_tag(i["type"]) + "  " + i["title"][:48] + "  " + dim("["+i["state"]+"]"))
         if active:
             hidden = len(active) - 8
             sfx_h  = "  " + dim("+ "+str(hidden)+" não exibidos") if hidden > 0 else ""
@@ -494,18 +537,19 @@ def cmd_daily(data):
             for i in active[:8]:
                 iid = i["id"]
                 d   = days_since(i["changedDate"])
-                sfx = "  " + y("⏱"+str(d)+"d") if d and d > 2 else ""
-                print("     " + dim("#"+str(iid)) + "  " + type_tag(i["type"]) + "  " + i["title"][:48] + sfx)
+                sfx = "  " + y(" ⏱ "+str(d)+"d") if d and d > 2 else ""
+                print("     " + ilink(iid) + "  " + type_tag(i["type"]) + "  " + i["title"][:48] + sfx)
         if blocked:
             print("  " + r("🔴 Reprovado/Bloqueado (" + str(len(blocked)) + "):"))
             for i in blocked:
                 iid = i["id"]
-                print("     " + dim("#"+str(iid)) + "  " + type_tag(i["type"]) + "  " + r(i["title"][:48]))
+                print("     " + ilink(iid) + "  " + type_tag(i["type"]) + "  " + r(i["title"][:48]))
         if not active and not done_it and not blocked:
             outros = [i for i in items if not is_active(i) and not is_done(i) and not is_blocked(i)]
             if outros:
                 sts = ", ".join(set(i["state"] for i in outros[:3]))
                 print("  " + dim("Outros (" + str(len(outros)) + "): " + sts))
+        show_incidents_for(frag)
         print()
 
     def qa_block():
@@ -519,13 +563,13 @@ def cmd_daily(data):
         print("  " + c("🧪 Pronto para testar hoje (" + str(len(pronto)) + "):"))
         for i in pronto[:8]:
             iid = i["id"]
-            print("     " + dim("#"+str(iid)) + "  " + type_tag(i["type"]) + "  " + i["title"][:45] + "  " + dim(i["assignedTo"]))
+            print("     " + ilink(iid) + "  " + type_tag(i["type"]) + "  " + i["title"][:45] + "  " + dim(i["assignedTo"]))
         if not pronto:
             print("     " + dim("Nenhum item em Pronto para QA"))
         print("  " + r("🔴 Reprovados — vira bug (" + str(len(reprov)) + "):"))
         for i in reprov[:8]:
             iid = i["id"]
-            print("     " + dim("#"+str(iid)) + "  " + type_tag(i["type"]) + "  " + r(i["title"][:45]) + "  " + dim(i["assignedTo"]))
+            print("     " + ilink(iid) + "  " + type_tag(i["type"]) + "  " + r(i["title"][:45]) + "  " + dim(i["assignedTo"]))
         if not reprov:
             print("     " + g("Nenhum item reprovado agora ✓"))
         if qa_items:
@@ -535,23 +579,45 @@ def cmd_daily(data):
             for i in qa_visible:
                 iid = i["id"]
                 d   = days_since(i["changedDate"])
-                print("     " + dim("#"+str(iid)) + "  " + type_tag(i["type"]) + "  " +
+                print("     " + ilink(iid) + "  " + type_tag(i["type"]) + "  " +
                       sc(i["state"])+i["state"][:18]+RS + "  " + i["title"][:40] + "  " + age_str(d))
+        print()
+
+    def incidents_block():
+        if not all_incidents:
+            return
+        all_people  = DEVS + QA_DEVS + INTEGRACOES + GESTAO
+        known_frags = [frag.lower() for _, _, frag in all_people]
+        others = [i for i in all_incidents
+                  if not any(f in i["assignedTo"].lower() for f in known_frags)]
+        if not others:
+            return
+        section("INCIDENTES CROSS", OR, "assignees externos ao time")
+        print("  " + dim("Outros assignees (" + str(len(others)) + "):"))
+        for i in sorted(others, key=lambda x: x.get("stateChangeDate") or "")[:10]:
+            d_recv = days_since(i.get("stateChangeDate"))
+            col_d  = RE if d_recv and d_recv > 10 else YE if d_recv and d_recv > 2 else DM
+            sfx    = ("  " + col_d + " ⏱ " + str(d_recv) + "d" + RS) if d_recv is not None else ""
+            print("     " + ilink(i["id"]) + "  " + OR + BD + "[INCI]" + RS + "  " +
+                  dim(i["assignedTo"][:24]) + "  " + i["title"][:40] + sfx)
         print()
 
     section("DEVS", WH)
     for label, role, frag in DEVS:
         dev_block(label, role, frag, BL)
-    section("QA", WH, "responde depois dos devs, não em paralelo")
-    qa_block()
     section("INTEGRAÇÕES", WH)
     for label, role, frag in INTEGRACOES:
         dev_block(label, role, frag, GR)
+    section("QA", WH, "responde depois dos devs, não em paralelo")
+    qa_block()
+    for label, role, frag in QA_DEVS:
+        show_incidents_for(frag, header=label + "  " + dim(role))
     section("GESTÃO", WH)
     for label, role, frag in GESTAO:
         dev_block(label, role, frag, CY)
+    incidents_block()
 
-    criticos = [i for i in flat if i["priority"] in ("0","1") and not is_done(i)]
+    criticos = [i for i in flat if i["priority"] in ("0","1") and not is_done(i) and not is_duplicate(i)]
     parados  = [i for i in flat if (days_since(i["changedDate"]) or 0) > 5 and not is_done(i) and not is_blocked(i)]
     log_execution("daily", {
         "flat": len(flat),
@@ -565,7 +631,7 @@ def cmd_daily(data):
             print("  " + r("P0/P1 ativos (" + str(len(criticos)) + "):"))
             for i in criticos[:6]:
                 iid = i["id"]
-                print("     " + dim("#"+str(iid)) + "  " + type_tag(i["type"]) + "  " + r(i["title"][:48]) + "  " + dim(i["assignedTo"]))
+                print("     " + ilink(iid) + "  " + type_tag(i["type"]) + "  " + r(i["title"][:48]) + "  " + dim(i["assignedTo"]))
         if parados:
             print("\n  " + y("Parados há +5 dias (" + str(len(parados)) + "):"))
             for i in sorted(parados, key=lambda x: days_since(x["changedDate"]) or 0, reverse=True)[:4]:
@@ -573,7 +639,7 @@ def cmd_daily(data):
                 person = (i["assignedTo"] or "").split()[0]
                 d_p    = fetch_last_touch(i["id"], person)
                 d_disp = d_p if d_p is not None else (days_since(i["changedDate"]) or 0)
-                print("     " + r(str(d_disp)+"d") + "  " + dim("#"+str(iid)) + "  " + type_tag(i["type"]) + "  " + i["title"][:44] + "  " + dim(i["assignedTo"]))
+                print("     " + r(str(d_disp)+"d") + "  " + ilink(iid) + "  " + type_tag(i["type"]) + "  " + i["title"][:44] + "  " + dim(i["assignedTo"]))
         print()
 
 def cmd_jornal(data):
@@ -817,7 +883,7 @@ def cmd_tasks(data):
             parent = parents_by_id.get(pid, {})
             pst    = parent.get("state", "")
             done_c, total_c = pbi_completion.get(pid, (0, len(ptasks)))
-            print("  " + dim("┌ #"+str(pid)) + "  " +
+            print("  " + dim("┌ ") + ilink(pid) + "  " +
                   type_tag(parent.get("type","")) + "  " +
                   sc(pst)+pst[:16]+RS + "  " +
                   WH+parent.get("title","")[:42]+RS + "  " +
@@ -827,7 +893,7 @@ def cmd_tasks(data):
                 done_m = g(" ✓") if is_done(t) else ""
                 blk    = r("  ●") if is_blocked(t) else ""
                 sfx_t  = "" if is_done(t) or is_blocked(t) else stale_sfx(t["id"], frag, t["changedDate"])
-                print("  " + dim("│  #"+str(t["id"])) + "  " +
+                print("  " + dim("│  ") + ilink(t["id"]) + "  " +
                       type_tag(t["type"]) + "  " +
                       sc(t["state"])+t["state"][:18]+RS + "  " +
                       t["title"][:40] + sfx_t + blk + done_m)
@@ -835,7 +901,7 @@ def cmd_tasks(data):
 
         for t in orphans:
             sfx_t = "" if is_done(t) else stale_sfx(t["id"], frag, t["changedDate"])
-            print("  " + dim("  #"+str(t["id"])) + "  " +
+            print("  " + dim("  ") + ilink(t["id"]) + "  " +
                   type_tag(t["type"]) + "  " +
                   sc(t["state"])+t["state"][:18]+RS + "  " + t["title"][:44] + sfx_t)
         print()
@@ -907,7 +973,7 @@ def cmd_refinamento(data):
 
         age_sfx = ("  " + dim(str(d_age) + "d")) if d_age is not None else ""
 
-        print(BD + BL + "▶ #" + str(iid) + RS + "  " +
+        print(BD + BL + "▶ " + RS + ilink(iid, col=BL+BD) + "  " +
               type_tag(item["type"]) + "  " +
               pc(pri) + "P" + pri + RS + "  " +
               sc(state) + state[:22] + RS + "  " +
@@ -939,7 +1005,7 @@ def cmd_refinamento(data):
                 person = (t["assignedTo"] or "").split()[0]
                 done_m = g(" ✓") if is_done(t) else ""
                 stale  = "" if is_done(t) else stale_sfx(t["id"], person, t["changedDate"])
-                print("  " + dim("│  #" + str(t["id"])) + "  " +
+                print("  " + dim("│  ") + ilink(t["id"]) + "  " +
                       type_tag(t["type"]) + "  " +
                       sc(t["state"]) + t["state"][:18] + RS + "  " +
                       t["title"][:42] + "  " +
@@ -999,7 +1065,7 @@ def menu_interativo(data):
         print(PU+BD+"╚══════════════════════════════════════════╝"+RS)
         print("\n  " + w(str(len(flat))) + " items   " +
               (r("● "+str(blk)+" bloqueados") if blk else dim("0 bloqueados")) + "   " +
-              (y("⏱ "+str(par)+" parados") if par else dim("0 parados")) + "   " +
+              (y(" ⏱ "+str(par)+" parados") if par else dim("0 parados")) + "   " +
               g("✓ "+str(don)+" entregues") + "\n")
         for k, (_, desc, _) in MENU.items():
             icon = PU+"✦"+RS+"  " if "Claude" in desc else "   "
