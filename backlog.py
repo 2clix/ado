@@ -54,7 +54,7 @@ FIELDS = ",".join([
     "Microsoft.VSTS.Common.Priority","System.WorkItemType",
     "System.ChangedDate","System.CreatedDate",
     "Microsoft.VSTS.Scheduling.Effort","System.Tags",
-    "Microsoft.VSTS.Common.StateChangeDate",
+    "Microsoft.VSTS.Common.StateChangeDate","System.Parent",
 ])
 DEVS = [
     ("Wesley Bernardes",  "Front Líder",         "Wesley"),
@@ -173,7 +173,8 @@ def fetch_tasks_direct(project=None, types=None):
     if not ids:
         return []
     id_str = ",".join(str(i) for i in ids)
-    data2  = ado_get(BASE_ORG + "/wit/workitems?ids=" + id_str + "&fields=" + FIELDS + "&api-version=7.1")
+    fields_with_parent = FIELDS + ",System.Parent"
+    data2  = ado_get(BASE_ORG + "/wit/workitems?ids=" + id_str + "&fields=" + fields_with_parent + "&api-version=7.1")
     result = []
     for wi in data2.get("value", []):
         f        = wi["fields"]
@@ -192,6 +193,7 @@ def fetch_tasks_direct(project=None, types=None):
             "effort":          f.get("Microsoft.VSTS.Scheduling.Effort", ""),
             "tags":            f.get("System.Tags", ""),
             "stateChangeDate": f.get("Microsoft.VSTS.Common.StateChangeDate", ""),
+            "parentId":        f.get("System.Parent"),
         })
     return result
 
@@ -221,6 +223,7 @@ def fetch_query(qid, project=None):
             "effort":          f.get("Microsoft.VSTS.Scheduling.Effort", ""),
             "tags":            f.get("System.Tags", ""),
             "stateChangeDate": f.get("Microsoft.VSTS.Common.StateChangeDate", ""),
+            "parentId":        f.get("System.Parent"),
         })
     return result
 
@@ -391,6 +394,10 @@ def is_done(i):
 def is_active(i):
     return any(k in i["state"].lower() for k in ["andamento","executar","fazendo","in progress","doing","to do","new","discovery","active"])
 
+def is_pbi_in_progress(i):
+    """True apenas se o PBI/parent está efetivamente em andamento (exclui discovery, backlog, aprovado)."""
+    return any(k in i["state"].lower() for k in ["andamento","in progress","doing","fazendo"])
+
 def is_duplicate(i):
     return "duplicado" in i["state"].lower()
 
@@ -458,24 +465,66 @@ def cmd_daily(data):
             seen.add(i["id"])
             flat.append(i)
 
-    # Busca tasks filhas dos PBIs/Bugs e mescla no flat
+    # Busca filhos de TODOS os parents para construir o mapa autoritativo child→parent
     print(dim("  Buscando subtasks dos PBIs..."))
-    tasks, _parent_map = fetch_children_of(flat)
+    all_children, parent_map = fetch_children_of(flat)
+
+    # IDs de tasks cujo parent está no flat mas NÃO em andamento (via parent_map — não depende de System.Parent)
+    inactive_task_ids = {
+        t["id"] for t in all_children
+        if not is_pbi_in_progress(parent_map.get(t["id"], {}))
+    }
+
+    # Remove do flat inicial tasks que vieram direto das queries mas pertencem a PBIs inativos
+    flat = [i for i in flat if i["id"] not in inactive_task_ids]
+    seen = {i["id"] for i in flat}
+
+    # Adiciona apenas filhos de PBIs em andamento
     added = 0
-    for t in tasks:
-        if t["id"] not in seen:
+    for t in all_children:
+        if t["id"] not in seen and t["id"] not in inactive_task_ids:
             seen.add(t["id"])
             flat.append(t)
             added += 1
 
-    # Busca Tasks ativas diretamente via WIQL (captura tasks cujo parent não está nas queries)
+    # Safety net WIQL — inclui tasks cujo parent está em andamento (ou sem parent conhecido)
     try:
         direct_tasks = fetch_tasks_direct(PROJECT, types=("Task", "Bug"))
+
+        # Parents de tasks diretas que NÃO estão em flat — precisa buscar o estado deles
+        unknown_pids = {
+            t["parentId"] for t in direct_tasks
+            if t.get("parentId") and t["parentId"] not in seen
+        }
+        unknown_parent_state: dict = {}
+        if unknown_pids:
+            id_str = ",".join(str(i) for i in unknown_pids)
+            try:
+                resp = ado_get(BASE_ORG + "/wit/workitems?ids=" + id_str
+                               + "&fields=System.State&api-version=7.1")
+                for wi in resp.get("value", []):
+                    unknown_parent_state[wi["id"]] = wi["fields"].get("System.State", "")
+            except Exception:
+                pass
+
+        flat_by_id = {i["id"]: i for i in flat}
         for t in direct_tasks:
-            if t["id"] not in seen:
-                seen.add(t["id"])
-                flat.append(t)
-                added += 1
+            if t["id"] in seen or t["id"] in inactive_task_ids:
+                continue
+            pid = t.get("parentId")
+            if pid:
+                if pid in flat_by_id:
+                    # Parent está no flat — verifica se está em andamento
+                    if not is_pbi_in_progress(flat_by_id[pid]):
+                        continue
+                elif pid in unknown_parent_state:
+                    # Parent fora do flat — usa o estado buscado acima
+                    st = unknown_parent_state[pid]
+                    if not any(k in st.lower() for k in ["andamento","in progress","doing","fazendo"]):
+                        continue
+            seen.add(t["id"])
+            flat.append(t)
+            added += 1
     except Exception:
         pass
 
