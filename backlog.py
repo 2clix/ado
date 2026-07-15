@@ -496,12 +496,8 @@ def cmd_daily(data):
             added += 1
 
     # Safety net WIQL — inclui tasks cujo parent está em andamento (ou sem parent conhecido)
-    # Cobre Plataforma Qualidade (Task+Bug) e MONITORIA_IA (PBI+Task+Bug — para devs não cobertos pela query salva)
     try:
-        direct_tasks = (
-            fetch_tasks_direct(PROJECT,       types=("Task", "Bug")) +
-            fetch_tasks_direct("MONITORIA_IA", types=("Product Backlog Item", "Task", "Bug"))
-        )
+        direct_tasks = fetch_tasks_direct(PROJECT, types=("Task", "Bug"))
 
         # Parents de tasks diretas que NÃO estão em flat — busca estado E título de uma vez
         unknown_pids = {
