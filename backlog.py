@@ -40,7 +40,7 @@ QUERIES = {
     "Esteira Dev Reprov":  ("585e2c79-0b53-4432-835c-04f3ad0a9cda", PROJECT),
     "Esteira DevOps":      ("7d0c77b6-e2e6-4e03-8336-9a472ce7d58c", PROJECT),
     "Esteira Front End":   ("a2605d42-a5e7-4763-88cb-432c8867bb6e", PROJECT),
-    "Esteira QA":          ("eeda5015-7395-4b25-b0c6-bf31280f9ba5", PROJECT),
+    "Esteira QA":          ("c8d04cde-635a-466d-a53a-0ef116c3ba07", "2clix"),
     "Integrações":         ("62e8aef3-b658-48f0-af7b-09abb7890996", "MONITORIA_IA"),
     "Refinamento":         ("6a95ca1e-4603-4a2d-ba76-a823097da1b5", PROJECT),
     "Espera Sprint":       ("33ede8e9-33c2-4dfb-9961-0157b1c0feb1", PROJECT),
