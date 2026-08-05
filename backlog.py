@@ -14,7 +14,7 @@ Uso:
     python3 backlog.py coach        # agile coach via Ollama local (requer ollama serve)
     python3 backlog.py [cmd] --refresh  # ignora cache e busca dados frescos
 """
-import os, sys, base64, json, urllib.request, urllib.parse
+import os, sys, base64, json, urllib.request, urllib.parse, textwrap
 from datetime import datetime, timezone
 from collections import defaultdict, Counter
 
@@ -710,8 +710,8 @@ def cmd_daily(data):
     print("\n" + GR+BD+"┌─ 🤖 Coach — Abertura " + "─"*27 + "┐"+RS)
     try:
         for _ln in ollama_generate(_opening_prompt, timeout=45).splitlines():
-            if _ln.strip():
-                print(GR+"│ "+RS + _ln.strip())
+            for _w in textwrap.wrap(_ln.strip(), width=74) if _ln.strip() else []:
+                print(GR+"│ "+RS + _w)
     except Exception:
         pass
     print(GR+BD+"└"+"─"*49+"┘"+RS+"\n")
@@ -760,8 +760,8 @@ def cmd_daily(data):
     try:
         _closing = ollama_generate(_closing_prompt, timeout=90)
         for _ln in _closing.splitlines():
-            if _ln.strip():
-                print("  " + _ln.strip())
+            for _w in textwrap.wrap(_ln.strip(), width=76) if _ln.strip() else []:
+                print("  " + _w)
     except OSError:
         print("  " + dim("Coach offline — `ollama serve` para ativar"))
     except Exception as e:
@@ -1199,8 +1199,8 @@ def cmd_coach(data):
         try:
             rec = ollama_generate(prompt)
             for line in rec.splitlines():
-                if line.strip():
-                    print("  " + line.strip())
+                for w in textwrap.wrap(line.strip(), width=76) if line.strip() else []:
+                    print("  " + w)
         except KeyboardInterrupt:
             print("\n  " + dim("Interrompido."))
             return
@@ -1237,7 +1237,8 @@ def cmd_coach(data):
         for line in forecast.splitlines():
             if line.strip():
                 col = RE if "ALTO" in line else YE if "MÉDIO" in line else GR if "BAIXO" in line else RS
-                print("  " + col + line.strip() + RS)
+                for w in textwrap.wrap(line.strip(), width=76):
+                    print("  " + col + w + RS)
     except KeyboardInterrupt:
         print("\n  " + dim("Interrompido."))
     except OSError:
