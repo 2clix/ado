@@ -10,7 +10,6 @@ Uso:
     python3 backlog.py gargalos     # gargalos e bloqueios
     python3 backlog.py wip          # WIP por pessoa
     python3 backlog.py parados      # items sem movimento
-    python3 backlog.py ask          # chat com Claude (requer ANTHROPIC_API_KEY)
     python3 backlog.py tasks        # tasks por dev (PBI → subtasks)
     python3 backlog.py coach        # agile coach via Ollama local (requer ollama serve)
     python3 backlog.py [cmd] --refresh  # ignora cache e busca dados frescos
@@ -833,69 +832,6 @@ def cmd_parados(data):
         print_item(item)
     print()
 
-def cmd_ask(data):
-    lines = ["Dados do backlog 2clix — Plataforma Qualidade — " + datetime.now().strftime("%d/%m/%Y")]
-    for qname, items in data.items():
-        lines.append("\n=== " + qname.upper() + " (" + str(len(items)) + " items) ===")
-        for i in items:
-            d = days_since(i["changedDate"])
-            lines.append(
-                "[#" + str(i["id"]) + "] " + i["type"] +
-                " | Estado: " + i["state"] +
-                " | Assignee: " + i["assignedTo"] +
-                " | P" + i["priority"] +
-                " | Effort: " + str(i["effort"] or "?") +
-                " | Última mudança: " + fmt_date(i["changedDate"]) + " (" + str(d) + "d)" +
-                " | Título: " + i["title"]
-            )
-    context = "\n".join(lines)
-    system  = (
-        "Você é o assistente de backlog da 2clix, especializado em gestão de demandas no Azure DevOps.\n"
-        "Responda sempre em português brasileiro, direto e operacional.\n"
-        "Destaque gargalos, cite IDs (#número) e assignees.\n"
-        "Para tempo parado, calcule com base na data de última mudança.\n"
-        "Contexto atual:\n" + context
-    )
-
-    print_logo("Assistente de IA · Plataforma Qualidade")
-    print("  " + PU+"─"*42+RS)
-    print("  " + PU+"✦  Assistente de IA — linguagem natural"+RS)
-    print("  " + PU+"─"*42+RS)
-    print("  " + dim("Digite sua pergunta. sair para voltar ao menu.") + "\n")
-
-    history = []
-    while True:
-        try:
-            q = input(BL+BD+"Você:"+RS+"  ").strip()
-        except (KeyboardInterrupt, EOFError):
-            break
-        if q.lower() in ("sair","exit","quit",""):
-            break
-        history.append({"role": "user", "content": q})
-        payload = json.dumps({
-            "model":      "claude-sonnet-4-6",
-            "max_tokens": 1000,
-            "system":     system,
-            "messages":   history,
-        }).encode()
-        try:
-            req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages",
-                data=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "x-api-key": os.environ.get("ANTHROPIC_API_KEY", ""),
-                    "anthropic-version": "2023-06-01",
-                },
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                dr = json.loads(resp.read())
-            reply = dr["content"][0]["text"]
-            history.append({"role": "assistant", "content": reply})
-            print("\n" + PU+BD+"Claude:"+RS + "  " + reply + "\n")
-        except Exception as e:
-            print(r("Erro ao chamar Claude: " + str(e)) + "\n")
 
 def cmd_tasks(data):
     daily_flat = []
@@ -1263,8 +1199,7 @@ MENU = {
     "5": ("gargalos",     "Gargalos e bloqueios",                  cmd_gargalos),
     "6": ("wip",          "WIP por pessoa",                        cmd_wip),
     "7": ("parados",      "Items parados há +3 dias",              cmd_parados),
-    "8": ("ask",          "Perguntar ao Claude  ✦ IA",             cmd_ask),
-    "9": ("tasks",        "Tasks por dev  (PBI → subtasks + %)",   cmd_tasks),
+    "8": ("tasks",        "Tasks por dev  (PBI → subtasks + %)",   cmd_tasks),
     "0": ("coach",        "Agile Coach  ✦ Ollama (local)",         cmd_coach),
 }
 
@@ -1316,4 +1251,4 @@ if __name__ == "__main__":
         if match:
             match(data)
         else:
-            print(r("Comando inválido. Use: resumo | daily | refinamento | jornal | gargalos | wip | parados | ask | tasks | coach"))
+            print(r("Comando inválido. Use: resumo | daily | refinamento | jornal | gargalos | wip | parados | tasks | coach"))
