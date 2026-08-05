@@ -1201,6 +1201,9 @@ def cmd_coach(data):
             for line in rec.splitlines():
                 if line.strip():
                     print("  " + line.strip())
+        except KeyboardInterrupt:
+            print("\n  " + dim("Interrompido."))
+            return
         except OSError:
             print("  " + r("⚠ Ollama não encontrado em " + OLLAMA_HOST + ". Inicie com: ollama serve"))
             return
@@ -1235,6 +1238,8 @@ def cmd_coach(data):
             if line.strip():
                 col = RE if "ALTO" in line else YE if "MÉDIO" in line else GR if "BAIXO" in line else RS
                 print("  " + col + line.strip() + RS)
+    except KeyboardInterrupt:
+        print("\n  " + dim("Interrompido."))
     except OSError:
         print("  " + r("⚠ Ollama não encontrado em " + OLLAMA_HOST + ". Inicie com: ollama serve"))
         return
@@ -1285,7 +1290,10 @@ def menu_interativo(data):
         elif choice == "r":
             data = load_cached(force_refresh=True)
         elif choice in MENU:
-            MENU[choice][2](data)
+            try:
+                MENU[choice][2](data)
+            except KeyboardInterrupt:
+                print("\n" + dim("Interrompido — voltando ao menu.") + "\n")
         else:
             print("  " + r("Opção inválida."))
 
