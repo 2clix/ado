@@ -30,6 +30,8 @@ if os.path.exists(_env):
 PAT              = os.environ.get("ADO_PAT", "")
 RECENT_DONE_DAYS = 7   # finalizados exibidos na daily
 LOG_FILE         = os.path.join(os.path.dirname(__file__), "logs", "executions.jsonl")
+CACHE_FILE       = os.path.join(os.path.dirname(__file__), "logs", "query_cache.json")
+CACHE_TTL        = 30  # minutos
 ORG      = "2clix"
 PROJECT  = "Plataforma Qualidade"
 ADO_HOST = "https://dev.azure.com"
@@ -201,31 +203,35 @@ def fetch_tasks_direct(project=None, types=None):
 def fetch_query(qid, project=None):
     base = base_for(project or PROJECT)
     data = ado_get(base + "/wit/wiql/" + qid + "?api-version=7.1")
-    ids  = [wi["id"] for wi in data.get("workItems", [])][:200]
+    ids  = [wi["id"] for wi in data.get("workItems", [])]
     if not ids:
         return []
-    id_str = ",".join(str(i) for i in ids)
-    data2  = ado_get(BASE_ORG + "/wit/workitems?ids=" + id_str + "&fields=" + FIELDS + "&api-version=7.1")
     result = []
-    for wi in data2.get("value", []):
-        f = wi["fields"]
-        assigned = f.get("System.AssignedTo", {})
-        if isinstance(assigned, dict):
-            assigned = assigned.get("displayName", "Não atribuído")
-        result.append({
-            "id":          wi["id"],
-            "title":       f.get("System.Title", ""),
-            "state":       f.get("System.State", ""),
-            "assignedTo":  (assigned or "Não atribuído").split(" <")[0].strip(),
-            "priority":    str(f.get("Microsoft.VSTS.Common.Priority", "")),
-            "type":        f.get("System.WorkItemType", ""),
-            "changedDate": f.get("System.ChangedDate", ""),
-            "createdDate": f.get("System.CreatedDate", ""),
-            "effort":          f.get("Microsoft.VSTS.Scheduling.Effort", ""),
-            "tags":            f.get("System.Tags", ""),
-            "stateChangeDate": f.get("Microsoft.VSTS.Common.StateChangeDate", ""),
-            "parentId":        f.get("System.Parent"),
-        })
+    for start in range(0, len(ids), 200):
+        id_str = ",".join(str(i) for i in ids[start:start + 200])
+        try:
+            data2 = ado_get(BASE_ORG + "/wit/workitems?ids=" + id_str + "&fields=" + FIELDS + "&api-version=7.1")
+        except Exception:
+            continue
+        for wi in data2.get("value", []):
+            f = wi["fields"]
+            assigned = f.get("System.AssignedTo", {})
+            if isinstance(assigned, dict):
+                assigned = assigned.get("displayName", "Não atribuído")
+            result.append({
+                "id":              wi["id"],
+                "title":           f.get("System.Title", ""),
+                "state":           f.get("System.State", ""),
+                "assignedTo":      (assigned or "Não atribuído").split(" <")[0].strip(),
+                "priority":        str(f.get("Microsoft.VSTS.Common.Priority", "")),
+                "type":            f.get("System.WorkItemType", ""),
+                "changedDate":     f.get("System.ChangedDate", ""),
+                "createdDate":     f.get("System.CreatedDate", ""),
+                "effort":          f.get("Microsoft.VSTS.Scheduling.Effort", ""),
+                "tags":            f.get("System.Tags", ""),
+                "stateChangeDate": f.get("Microsoft.VSTS.Common.StateChangeDate", ""),
+                "parentId":        f.get("System.Parent"),
+            })
     return result
 
 def load_all():
@@ -240,6 +246,27 @@ def load_all():
             print("  " + r("✗") + " " + name + ": " + str(e))
             all_data[name] = []
     return all_data
+
+def load_cached(force_refresh=False):
+    """Retorna dados das queries do ADO, usando cache local (TTL: CACHE_TTL min) quando disponível."""
+    if not force_refresh and os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE) as f:
+                cached = json.load(f)
+            age = (datetime.now() - datetime.fromisoformat(cached["fetched_at"])).total_seconds() / 60
+            if age < CACHE_TTL:
+                print(dim("  Cache de " + str(int(age)) + "min atrás — use --refresh para atualizar"))
+                return cached["data"]
+        except Exception:
+            pass
+    data = load_all()
+    try:
+        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        with open(CACHE_FILE, "w") as f:
+            json.dump({"fetched_at": datetime.now().isoformat(), "data": data}, f, ensure_ascii=False)
+    except Exception:
+        pass
+    return data
 
 def log_execution(cmd, stats):
     """Grava linha JSONL em logs/executions.jsonl para histórico de execuções."""
@@ -1187,7 +1214,7 @@ def menu_interativo(data):
             print("\n" + dim("Até logo!") + "\n")
             break
         elif choice == "r":
-            data = load_all()
+            data = load_cached(force_refresh=True)
         elif choice in MENU:
             MENU[choice][2](data)
         else:
@@ -1195,8 +1222,11 @@ def menu_interativo(data):
 
 # ── Entry ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    cmd  = sys.argv[1].lower() if len(sys.argv) > 1 else None
-    data = load_all()
+    _args    = sys.argv[1:]
+    _refresh = "--refresh" in _args
+    _args    = [a for a in _args if a != "--refresh"]
+    cmd      = _args[0].lower() if _args else None
+    data     = load_cached(force_refresh=_refresh)
     if cmd is None:
         menu_interativo(data)
     else:
