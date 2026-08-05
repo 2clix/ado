@@ -10,8 +10,10 @@ Uso:
     python3 backlog.py gargalos     # gargalos e bloqueios
     python3 backlog.py wip          # WIP por pessoa
     python3 backlog.py parados      # items sem movimento
-    python3 backlog.py ask          # chat com Claude
+    python3 backlog.py ask          # chat com Claude (requer ANTHROPIC_API_KEY)
     python3 backlog.py tasks        # tasks por dev (PBI → subtasks)
+    python3 backlog.py coach        # agile coach via Ollama local (requer ollama serve)
+    python3 backlog.py [cmd] --refresh  # ignora cache e busca dados frescos
 """
 import os, sys, base64, json, urllib.request, urllib.parse
 from datetime import datetime, timezone
@@ -32,6 +34,8 @@ RECENT_DONE_DAYS = 7   # finalizados exibidos na daily
 LOG_FILE         = os.path.join(os.path.dirname(__file__), "logs", "executions.jsonl")
 CACHE_FILE       = os.path.join(os.path.dirname(__file__), "logs", "query_cache.json")
 CACHE_TTL        = 30  # minutos
+OLLAMA_HOST      = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL     = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:14b")
 ORG      = "2clix"
 PROJECT  = "Plataforma Qualidade"
 ADO_HOST = "https://dev.azure.com"
@@ -1110,6 +1114,146 @@ def cmd_refinamento(data):
     })
 
 
+# ── Agile Coach (Ollama) ──────────────────────────────────────────────────────
+def ollama_generate(prompt, timeout=90):
+    """Chama POST /api/generate no Ollama local. Retorna o texto gerado ou lança exceção."""
+    url  = OLLAMA_HOST + "/api/generate"
+    body = json.dumps({"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}).encode()
+    req  = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read()).get("response", "").strip()
+
+def build_team_snapshot(data):
+    """Monta snapshot do estado do time para o contexto do LLM."""
+    flat = []
+    for qname in DAILY_QUERIES:
+        flat.extend(data.get(qname, []))
+    seen = set()
+    uniq = []
+    for i in flat:
+        if i["id"] not in seen:
+            seen.add(i["id"])
+            uniq.append(i)
+
+    incidents = [i for i in data.get("Incidentes Cross", [])
+                 if i["state"].lower() in {"approved", "em andamento", "pronto para qa"}]
+
+    all_people = DEVS + INTEGRACOES + QA_DEVS + GESTAO
+    devs_snap  = []
+    for label, role, frag in all_people:
+        items   = [i for i in uniq if frag.lower() in i["assignedTo"].lower()]
+        active  = [i for i in items if is_active(i)]
+        blocked = [i for i in items if is_blocked(i)]
+        done7   = [i for i in items if is_done(i) and (days_since(i["changedDate"]) or 999) <= RECENT_DONE_DAYS]
+        stale   = [i for i in active if (days_since(i["changedDate"]) or 0) > 5]
+        incis   = [i for i in incidents if frag.lower() in i["assignedTo"].lower()]
+        titles  = [(("#"+str(i["id"])+" ["+i["type"][:4].upper()+"] "+i["title"][:60])
+                    + (" [BLOQUEADO]" if is_blocked(i) else "")) for i in (active+blocked)[:6]]
+        devs_snap.append({
+            "nome":          label,
+            "papel":         role,
+            "em_andamento":  len(active),
+            "bloqueados":    len(blocked),
+            "parados_5d":    len(stale),
+            "finalizados_7d": len(done7),
+            "incidentes":    len(incis),
+            "items":         titles,
+        })
+
+    total_active  = sum(d["em_andamento"]  for d in devs_snap)
+    total_blocked = sum(d["bloqueados"]    for d in devs_snap)
+    total_stale   = sum(d["parados_5d"]    for d in devs_snap)
+    total_done7   = sum(d["finalizados_7d"]for d in devs_snap)
+    p01 = [i for i in uniq if i.get("priority") in ("0","1") and not is_done(i)]
+    return {"devs": devs_snap, "resumo": {
+        "total_items": len(uniq),
+        "em_andamento": total_active,
+        "bloqueados": total_blocked,
+        "parados_5d": total_stale,
+        "finalizados_7d": total_done7,
+        "incidentes_abertos": len(incidents),
+        "p0_p1_abertos": len(p01),
+    }}
+
+def cmd_coach(data):
+    snap = build_team_snapshot(data)
+    if not snap["devs"] or snap["resumo"]["total_items"] == 0:
+        print("\n" + y("⚠ Sem dados de backlog carregados. Rode com --refresh e tente novamente.") + "\n")
+        return
+
+    now = datetime.now().strftime("%d/%m/%Y %H:%M")
+    print_logo("Agile Coach · " + OLLAMA_MODEL + " · " + now)
+    print("\n" + GR+BD+"╔══════════════════════════════════════════╗"+RS)
+    print(GR+BD+"║  🤖 AGILE COACH  ·  " + now.ljust(20) + "║"+RS)
+    print(GR+BD+"╚══════════════════════════════════════════╝"+RS)
+    print(dim("  Modelo: " + OLLAMA_MODEL + "  ·  " + OLLAMA_HOST) + "\n")
+
+    # ── Recomendações por dev ──────────────────────────────────────────────────
+    section("RECOMENDAÇÕES POR DEV", GR)
+    for dev in snap["devs"]:
+        items_txt = "\n  ".join(dev["items"]) if dev["items"] else "nenhum item ativo"
+        prompt = (
+            "Você é um agile coach experiente. Analise o estado de trabalho do dev abaixo "
+            "e escreva uma recomendação em português de 1 a 3 linhas. "
+            "Seja direto, construtivo e específico. Não invente dados além dos fornecidos. "
+            "Tom profissional e humano. Responda APENAS com a recomendação, sem prefixo.\n\n"
+            f"Dev: {dev['nome']} ({dev['papel']})\n"
+            f"Em andamento: {dev['em_andamento']} | Bloqueados: {dev['bloqueados']} | "
+            f"Parados >5d: {dev['parados_5d']} | Finalizados (7d): {dev['finalizados_7d']} | "
+            f"Incidentes: {dev['incidentes']}\n"
+            f"Items:\n  {items_txt}\n\n"
+            "Recomendação:"
+        )
+        print(BD + GR + "▶ " + dev["nome"] + RS + "  " + dim(dev["papel"]))
+        if not dev["items"] and dev["em_andamento"] == 0:
+            print("  " + dim("Sem itens ativos — nada a reportar") + "\n")
+            continue
+        try:
+            rec = ollama_generate(prompt)
+            for line in rec.splitlines():
+                if line.strip():
+                    print("  " + line.strip())
+        except OSError:
+            print("  " + r("⚠ Ollama não encontrado em " + OLLAMA_HOST + ". Inicie com: ollama serve"))
+            return
+        except Exception as e:
+            print("  " + y("⚠ Timeout ou erro: " + str(e)[:60]))
+        print()
+
+    # ── Previsão de risco do sprint ────────────────────────────────────────────
+    section("PREVISÃO DE RISCO DO SPRINT", YE)
+    r_sum = snap["resumo"]
+    snapshot_txt = (
+        f"Time: {len(snap['devs'])} pessoas\n"
+        f"Items em andamento: {r_sum['em_andamento']}\n"
+        f"Bloqueados: {r_sum['bloqueados']}\n"
+        f"Parados há >5 dias: {r_sum['parados_5d']}\n"
+        f"Finalizados nos últimos 7 dias: {r_sum['finalizados_7d']}\n"
+        f"Incidentes abertos: {r_sum['incidentes_abertos']}\n"
+        f"P0/P1 em aberto: {r_sum['p0_p1_abertos']}\n"
+    )
+    forecast_prompt = (
+        "Você é um agile coach. Com base no snapshot do time abaixo, avalie o risco de entrega "
+        "do sprint. Responda em português com exatamente este formato:\n\n"
+        "RISCO: BAIXO | MÉDIO | ALTO\n"
+        "FATORES:\n- fator 1\n- fator 2\n"
+        "AÇÃO: uma ação recomendada para o Scrum Master\n\n"
+        f"Snapshot:\n{snapshot_txt}\n"
+        "Avaliação:"
+    )
+    try:
+        forecast = ollama_generate(forecast_prompt)
+        for line in forecast.splitlines():
+            if line.strip():
+                col = RE if "ALTO" in line else YE if "MÉDIO" in line else GR if "BAIXO" in line else RS
+                print("  " + col + line.strip() + RS)
+    except OSError:
+        print("  " + r("⚠ Ollama não encontrado em " + OLLAMA_HOST + ". Inicie com: ollama serve"))
+        return
+    except Exception as e:
+        print("  " + y("⚠ Timeout ou erro: " + str(e)[:60]))
+    print()
+
 # ── Menu ──────────────────────────────────────────────────────────────────────
 MENU = {
     "1": ("resumo",       "Resumo geral",                          cmd_resumo),
@@ -1121,6 +1265,7 @@ MENU = {
     "7": ("parados",      "Items parados há +3 dias",              cmd_parados),
     "8": ("ask",          "Perguntar ao Claude  ✦ IA",             cmd_ask),
     "9": ("tasks",        "Tasks por dev  (PBI → subtasks + %)",   cmd_tasks),
+    "0": ("coach",        "Agile Coach  ✦ Ollama (local)",         cmd_coach),
 }
 
 def menu_interativo(data):
@@ -1139,15 +1284,15 @@ def menu_interativo(data):
               (y(" ⏱ "+str(par)+" parados") if par else dim("0 parados")) + "   " +
               g("✓ "+str(don)+" entregues") + "\n")
         for k, (_, desc, _) in MENU.items():
-            icon = PU+"✦"+RS+"  " if "Claude" in desc else "   "
+            icon = PU+"✦"+RS+"  " if "✦" in desc else "   "
             print("  " + c(k) + "." + icon + w(desc))
-        print("\n  " + dim("r. recarregar     0. sair") + "\n")
+        print("\n  " + dim("r. recarregar     q. sair") + "\n")
         try:
             choice = input(BL+BD+"Escolha:"+RS+" ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             print("\n" + dim("Até logo!") + "\n")
             break
-        if choice == "0":
+        if choice in ("q", "quit", "exit"):
             print("\n" + dim("Até logo!") + "\n")
             break
         elif choice == "r":
@@ -1171,4 +1316,4 @@ if __name__ == "__main__":
         if match:
             match(data)
         else:
-            print(r("Comando inválido. Use: resumo | daily | refinamento | jornal | gargalos | wip | parados | ask | tasks"))
+            print(r("Comando inválido. Use: resumo | daily | refinamento | jornal | gargalos | wip | parados | ask | tasks | coach"))
