@@ -37,17 +37,10 @@ PROJECT  = "Plataforma Qualidade"
 ADO_HOST = "https://dev.azure.com"
 
 QUERIES = {
-    "Esteira Dev":         ("4bb03a89-b9bf-49fb-915e-4619f09a8440", PROJECT),
-    "Esteira Dev Flat":    ("10e4fce2-3c83-4a8c-8805-b43c56e9bacc", PROJECT),
-    "Esteira Dev Reprov":  ("585e2c79-0b53-4432-835c-04f3ad0a9cda", PROJECT),
-    "Esteira DevOps":      ("7d0c77b6-e2e6-4e03-8336-9a472ce7d58c", PROJECT),
-    "Esteira Front End":   ("a2605d42-a5e7-4763-88cb-432c8867bb6e", PROJECT),
-    "Esteira QA":          ("c8d04cde-635a-466d-a53a-0ef116c3ba07", "2clix"),
-    "Integrações":         ("62e8aef3-b658-48f0-af7b-09abb7890996", "MONITORIA_IA"),
-    "Refinamento":         ("6a95ca1e-4603-4a2d-ba76-a823097da1b5", PROJECT),
-    "Espera Sprint":       ("33ede8e9-33c2-4dfb-9961-0157b1c0feb1", PROJECT),
-    "Jornal":              ("bd80d41b-8279-48fd-abfb-61ae3dcd7050", PROJECT),
-    "Incidentes Cross":   ("539b23e7-b8a5-44da-a996-c717056af9fa", "2clix"),
+    "Devs 180d":       ("e40ad7ac-08cf-4a06-9560-711c5b78568d", "2clix"),
+    "Refinamento":     ("6a95ca1e-4603-4a2d-ba76-a823097da1b5", PROJECT),
+    "Jornal":          ("bd80d41b-8279-48fd-abfb-61ae3dcd7050", PROJECT),
+    "Incidentes Cross": ("539b23e7-b8a5-44da-a996-c717056af9fa", "2clix"),
 }
 PARENT_TYPES = {"Product Backlog Item", "Bug", "Feature", "Epic"}
 
@@ -80,11 +73,7 @@ GESTAO = [
     ("Laion Jordi",       "Produto",             "Laion"),
 ]
 
-DAILY_QUERIES = [
-    "Esteira Dev", "Esteira Dev Flat", "Esteira Dev Reprov",
-    "Esteira Front End", "Esteira QA", "Esteira DevOps",
-    "Integrações", "Espera Sprint", "Refinamento",
-]
+DAILY_QUERIES = ["Devs 180d"]
 
 # ── Cores ─────────────────────────────────────────────────────────────────────
 RS  = "\033[0m"
@@ -517,63 +506,11 @@ def cmd_daily(data):
     flat = [i for i in flat if i["id"] not in inactive_task_ids]
     seen = {i["id"] for i in flat}
 
-    # Adiciona apenas filhos de PBIs em andamento
-    added = 0
+    # Adiciona filhos de PBIs em andamento que ainda não estão no flat
     for t in all_children:
         if t["id"] not in seen and t["id"] not in inactive_task_ids:
             seen.add(t["id"])
             flat.append(t)
-            added += 1
-
-    # Safety net WIQL — inclui tasks cujo parent está em andamento (ou sem parent conhecido)
-    try:
-        direct_tasks = fetch_tasks_direct(PROJECT, types=("Task", "Bug"))
-
-        # Parents de tasks diretas que NÃO estão em flat — busca estado E título de uma vez
-        unknown_pids = {
-            t["parentId"] for t in direct_tasks
-            if t.get("parentId") and t["parentId"] not in seen
-        }
-        unknown_parent_info: dict = {}
-        if unknown_pids:
-            id_str = ",".join(str(i) for i in unknown_pids)
-            try:
-                resp = ado_get(BASE_ORG + "/wit/workitems?ids=" + id_str
-                               + "&fields=System.State,System.Title&api-version=7.1")
-                for wi in resp.get("value", []):
-                    unknown_parent_info[wi["id"]] = {
-                        "state": wi["fields"].get("System.State", ""),
-                        "title": wi["fields"].get("System.Title", ""),
-                    }
-            except Exception:
-                pass
-
-        flat_by_id = {i["id"]: i for i in flat}
-        for t in direct_tasks:
-            if t["id"] in seen or t["id"] in inactive_task_ids:
-                continue
-            pid = t.get("parentId")
-            if pid:
-                if pid in flat_by_id:
-                    if not is_pbi_in_progress(flat_by_id[pid]):
-                        continue
-                    parent_title_map[t["id"]]  = flat_by_id[pid].get("title", "")
-                    parent_active_map[t["id"]] = True
-                elif pid in unknown_parent_info:
-                    info = unknown_parent_info[pid]
-                    st   = info["state"]
-                    if not any(k in st.lower() for k in ["andamento","in progress","doing","fazendo"]):
-                        continue
-                    parent_title_map[t["id"]]  = info["title"]
-                    parent_active_map[t["id"]] = True
-            seen.add(t["id"])
-            flat.append(t)
-            added += 1
-    except Exception:
-        pass
-
-    if added:
-        print("  " + g("✓") + " " + str(added) + " tasks adicionadas\n")
 
     # Gap-fill: parent_title_map para tasks que vieram direto das queries (não via parent_map)
     _flat_by_id = {i["id"]: i for i in flat}
