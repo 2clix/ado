@@ -73,7 +73,6 @@ INTEGRACOES = [
 ]
 GESTAO = [
     ("Rafael Baena",      "Gestão Dev",          "Baena"),
-    ("Laion Jordi",       "Produto",             "Laion"),
 ]
 
 DAILY_QUERIES = ["Devs 180d"]
@@ -411,6 +410,11 @@ def is_blocked(i):
 def is_done(i):
     return any(k in i["state"].lower() for k in ["done","publicado","validado qa","pronto para qa","closed","resolved"])
 
+def is_terminal(i):
+    """True para estados finais que não devem aparecer na daily (além de done)."""
+    sl = (i.get("state") or "").lower()
+    return is_done(i) or any(k in sl for k in ["removed","removido","duplicado","congelado","executado"])
+
 def is_active(i):
     return any(k in i["state"].lower() for k in ["andamento","executar","fazendo","in progress","doing","to do","new","discovery","active"])
 
@@ -547,6 +551,14 @@ def cmd_daily(data):
                     k in info["state"].lower() for k in ["andamento","in progress","doing","fazendo"]
                 )
 
+    # Remove tasks com parent conhecido e inativo (vindas direto da query de 180d, não via fetch_children_of)
+    flat = [
+        i for i in flat
+        if i["type"] in PARENT_TYPES
+        or not i.get("parentId")
+        or parent_active_map.get(i["id"], True)
+    ]
+
     now  = datetime.now().strftime("%d/%m/%Y %H:%M")
     print_logo("Daily · " + now)
     print("\n" + PU+BD+"═"*50+RS)
@@ -570,15 +582,17 @@ def cmd_daily(data):
             return pfx + i["title"][:max(1, maxw - 25)]
         return i["title"][:maxw]
 
-    def show_incidents_for(frag, header=None):
+    def show_incidents_for(frag, header=None, limit=8):
         mine = [i for i in all_incidents if frag.lower() in i["assignedTo"].lower()]
         if not mine:
             return
+        shown  = sorted(mine, key=lambda x: x.get("stateChangeDate") or "")[:limit]
+        hidden = len(mine) - len(shown)
         if header:
             print(BD + OR + "▶ " + header + RS + "  " + OR + str(len(mine)) + " incidente(s)" + RS)
         else:
             print("  " + OR + "⚡ Incidentes (" + str(len(mine)) + "):" + RS)
-        for i in sorted(mine, key=lambda x: x.get("stateChangeDate") or ""):
+        for i in shown:
             iid    = i["id"]
             d_recv = days_since(i.get("stateChangeDate"))
             col_d  = RE if d_recv and d_recv > 10 else YE if d_recv and d_recv > 2 else DM
@@ -587,6 +601,8 @@ def cmd_daily(data):
                   pc(i["priority"]) + "P" + i["priority"] + RS + "  " +
                   sc(i["state"]) + i["state"][:16] + RS + "  " +
                   i["title"][:44] + sfx)
+        if hidden:
+            print("     " + dim("+ " + str(hidden) + " não exibidos"))
 
     def dev_block(label, role, frag, col=BL):
         items   = [i for i in find_items(flat, frag) if not is_duplicate(i)]
@@ -648,7 +664,7 @@ def cmd_daily(data):
             print("     " + g("Nenhum item reprovado agora ✓"))
         if qa_items:
             qa_visible = [i for i in qa_items.values()
-                          if not is_done(i) or (days_since(i["changedDate"]) or 999) <= RECENT_DONE_DAYS]
+                          if not is_terminal(i) or (days_since(i["changedDate"]) or 999) <= RECENT_DONE_DAYS]
             print("  " + y("📋 Items atribuídos ao time QA (" + str(len(qa_visible)) + "):"))
             for i in qa_visible:
                 iid = i["id"]
