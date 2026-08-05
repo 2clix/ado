@@ -692,6 +692,30 @@ def cmd_daily(data):
                   dim(i["assignedTo"][:24]) + "  " + i["title"][:40] + sfx)
         print()
 
+    # ── Coach — Abertura ──────────────────────────────────────────────────────
+    _snap = build_team_snapshot(data)
+    _r    = _snap["resumo"]
+    _opening_prompt = (
+        "Você é um agile coach abrindo a daily de desenvolvimento. "
+        "Em 2 a 3 frases diretas em português: mencione o ritmo recente do time, "
+        "sinalize se há algo crítico e dê o foco principal para hoje. "
+        "Tom motivador, sem bullet points, sem jargão. Texto corrido.\n\n"
+        f"Time: {len(_snap['devs'])} pessoas · "
+        f"{_r['em_andamento']} em andamento · "
+        f"{_r['finalizados_7d']} entregues nos últimos 7 dias · "
+        f"{_r['bloqueados']} bloqueados · "
+        f"{_r['p0_p1_abertos']} P0/P1 abertos · "
+        f"{_r['incidentes_abertos']} incidentes ativos\n\nAbertura:"
+    )
+    print("\n" + GR+BD+"┌─ 🤖 Coach — Abertura " + "─"*27 + "┐"+RS)
+    try:
+        for _ln in ollama_generate(_opening_prompt, timeout=45).splitlines():
+            if _ln.strip():
+                print(GR+"│ "+RS + _ln.strip())
+    except Exception:
+        pass
+    print(GR+BD+"└"+"─"*49+"┘"+RS+"\n")
+
     section("DEVS", WH)
     for label, role, frag in DEVS:
         dev_block(label, role, frag, BL)
@@ -705,8 +729,8 @@ def cmd_daily(data):
     section("GESTÃO", WH)
     for label, role, frag in GESTAO:
         dev_block(label, role, frag, CY)
-    incidents_block()
 
+    # ── Coach — Síntese de fechamento ─────────────────────────────────────────
     criticos = [i for i in flat if i["priority"] in ("0","1") and not is_done(i) and not is_duplicate(i)]
     parados  = [i for i in flat if (days_since(i["changedDate"]) or 0) > 5 and not is_done(i) and not is_blocked(i)]
     log_execution("daily", {
@@ -715,22 +739,34 @@ def cmd_daily(data):
         "criticos": len(criticos),
         "parados_ativos": len(parados),
     })
-    if criticos or parados:
-        section("⚡ ALERTAS FINAIS", RE)
-        if criticos:
-            print("  " + r("P0/P1 ativos (" + str(len(criticos)) + "):"))
-            for i in criticos[:6]:
-                iid = i["id"]
-                print("     " + ilink(iid) + "  " + type_tag(i["type"]) + "  " + r(i["title"][:48]) + "  " + dim(i["assignedTo"]))
-        if parados:
-            print("\n  " + y("Parados há +5 dias (" + str(len(parados)) + "):"))
-            for i in sorted(parados, key=lambda x: days_since(x["changedDate"]) or 0, reverse=True)[:4]:
-                iid    = i["id"]
-                person = (i["assignedTo"] or "").split()[0]
-                d_p    = fetch_last_touch(i["id"], person)
-                d_disp = d_p if d_p is not None else (days_since(i["changedDate"]) or 0)
-                print("     " + r(str(d_disp)+"d") + "  " + ilink(iid) + "  " + type_tag(i["type"]) + "  " + i["title"][:44] + "  " + dim(i["assignedTo"]))
-        print()
+    _devs_ctx = "\n".join(
+        f"- {d['nome']} ({d['papel']}): {d['em_andamento']} ativo(s), "
+        f"{d['bloqueados']} bloqueado(s), {d['parados_5d']} parado(s)>5d, "
+        f"{d['finalizados_7d']} entregue(s)/7d, {d['incidentes']} incidente(s)"
+        for d in _snap["devs"]
+    )
+    _criticos_ctx = (
+        "\nAtenção P0/P1: " + ", ".join(f"#{i['id']} {i['title'][:35]}" for i in criticos[:5])
+    ) if criticos else ""
+    _closing_prompt = (
+        "Você é um agile coach fechando a daily. Em português, sem markdown:\n"
+        "1. Um parágrafo curto sobre o ritmo geral do time hoje\n"
+        "2. Para cada pessoa com itens ativos, uma linha: nome + reconhecimento ou nudge "
+        "construtivo (sem expor negativamente, incentivando evolução)\n"
+        "3. Uma frase de encerramento motivacional para o time\n\n"
+        f"Time:\n{_devs_ctx}{_criticos_ctx}\n\nSíntese:"
+    )
+    section("🤖 AGILE COACH — Síntese da Daily", GR)
+    try:
+        _closing = ollama_generate(_closing_prompt, timeout=90)
+        for _ln in _closing.splitlines():
+            if _ln.strip():
+                print("  " + _ln.strip())
+    except OSError:
+        print("  " + dim("Coach offline — `ollama serve` para ativar"))
+    except Exception as e:
+        print("  " + dim("Coach indisponível: " + str(e)[:50]))
+    print()
 
 def cmd_jornal(data):
     items = data.get("Jornal", [])
